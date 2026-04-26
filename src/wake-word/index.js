@@ -7,7 +7,7 @@
  * window detection.
  */
 
-import { State, BlurReason } from '../constants.js';
+import { State, BlurReason, INTERACTING_STATES } from '../constants.js';
 import { getSwitchState, getSelectState } from '../shared/satellite-state.js';
 import { CHIME_WAKE, getChimeDuration } from '../audio/chime.js';
 import { loadTFLite, loadMicroModels, loadMicroModel, getMicroModelParams, releaseUnusedMicroModels, resetRuntime } from './micro-models.js';
@@ -909,6 +909,9 @@ export class WakeWordManager {
     if (session.timer.alertActive) {
       this._log.log('stop-word', 'Dismissing timer alert');
       session.timer.dismissAlert();
+      // Timer's clearAlert disables the stop model; re-arm it for any
+      // media that's still playing in the background.
+      session.mediaPlayer.refreshStopWord();
       return;
     }
 
@@ -941,6 +944,8 @@ export class WakeWordManager {
       session.askQuestion.cancel();
       session.chat.clear();
       session.ui.clearNotificationStatusOverride();
+      // Resume media that was paused for the notification.
+      session.mediaPlayer.resumeAfterInterrupt();
 
       if (getSwitchState(session.hass, session.config.satellite_entity, 'wake_sound') !== false) {
         session.tts.playChime('done');
@@ -949,27 +954,46 @@ export class WakeWordManager {
       return;
     }
 
-    // 3. TTS / active interaction
-    this._log.log('stop-word', 'Cancelling interaction');
+    // 3. Active voice interaction (TTS playing or pipeline interacting)
+    const isInteracting = session.tts.isPlaying
+      || INTERACTING_STATES.includes(session.currentState);
+    if (isInteracting) {
+      this._log.log('stop-word', 'Cancelling interaction');
 
-    if (session._imageLingerTimeout) {
-      clearTimeout(session._imageLingerTimeout);
-      session._imageLingerTimeout = null;
+      if (session._imageLingerTimeout) {
+        clearTimeout(session._imageLingerTimeout);
+        session._imageLingerTimeout = null;
+      }
+
+      session.tts.stop();
+
+      session.askQuestion.cancel();
+      session.pipeline.clearContinueState();
+      session.setState(State.IDLE);
+      session.chat.clear();
+      session.ui.hideBlurOverlay(BlurReason.PIPELINE);
+      session.ui.updateForState(State.IDLE, session.pipeline.serviceUnavailable, false);
+      // Resume media that was paused at the start of the interaction.
+      session.mediaPlayer.resumeAfterInterrupt();
+
+      if (getSwitchState(session.hass, session.config.satellite_entity, 'wake_sound') !== false) {
+        session.tts.playChime('done');
+      }
+      session.pipeline.restart(0);
+      return;
     }
 
-    session.tts.stop();
-
-    session.askQuestion.cancel();
-    session.pipeline.clearContinueState();
-    session.setState(State.IDLE);
-    session.chat.clear();
-    session.ui.hideBlurOverlay(BlurReason.PIPELINE);
-    session.ui.updateForState(State.IDLE, session.pipeline.serviceUnavailable, false);
-
-    if (getSwitchState(session.hass, session.config.satellite_entity, 'wake_sound') !== false) {
-      session.tts.playChime('done');
+    // 4. Media playback — fallback when nothing else is active.
+    if (session.mediaPlayer.isPlaying) {
+      this._log.log('stop-word', 'Stopping media playback');
+      session.mediaPlayer.stop();
+      if (getSwitchState(session.hass, session.config.satellite_entity, 'wake_sound') !== false) {
+        session.tts.playChime('done');
+      }
+      return;
     }
-    session.pipeline.restart(0);
+
+    this._log.log('stop-word', 'Nothing to cancel');
   }
 
   // ─── Restart / settings ─────────────────────────────────────────────

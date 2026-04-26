@@ -491,6 +491,7 @@ export function handleError(mgr, errorData) {
         'Duplicate wake-up — cancelled pending chime, silently aborting');
       mgr.card.wakeWord?.clearPendingWakeLatency?.();
       mgr.card.ui.hideBlurOverlay(BlurReason.PIPELINE);
+      mgr.card.mediaPlayer.resumeAfterInterrupt();
       if (INTERACTING_STATES.includes(mgr.card.currentState)) {
         mgr.card.setState(State.IDLE);
         mgr.card.chat.clear();
@@ -513,6 +514,7 @@ export function handleError(mgr, errorData) {
       mgr.card.chat.clear();
       mgr.shouldContinue = false;
       mgr.continueConversationId = null;
+      mgr.card.mediaPlayer.resumeAfterInterrupt();
       if (errorCode === 'duplicate_wake_up_detected') {
         mgr.card.wakeWord?.clearPendingWakeLatency?.();
       }
@@ -557,6 +559,7 @@ export function handleError(mgr, errorData) {
     mgr.card.chat.clear();
     mgr.card.ui.hideBar();
     mgr.card.ui.hideBlurOverlay(BlurReason.PIPELINE);
+    mgr.card.mediaPlayer.resumeAfterInterrupt();
     try { mgr.card.teardown(); } catch (e) {
       mgr.log.error('error', `teardown failed: ${e?.message || e}`);
     }
@@ -577,6 +580,7 @@ export function handleError(mgr, errorData) {
   mgr.card.chat.clear();
   mgr.card.ui.hideBar();
   mgr.card.ui.hideBlurOverlay(BlurReason.PIPELINE);
+  mgr.card.mediaPlayer.resumeAfterInterrupt();
 
   mgr.restart(mgr.calculateRetryDelay());
 }

@@ -166,6 +166,10 @@ export class AskQuestionManager {
       this._card.ui.hideBlurOverlay(BlurReason.PIPELINE);
       this.playing = false;
       if (!this.queued) {
+        // Resume any media playback paused at the start of the question.
+        // Skipped when another notification is queued — its own interrupt()
+        // will keep playback paused.
+        this._card.mediaPlayer.resumeAfterInterrupt();
         pipeline.restart(0);
       } else {
         this.playQueued();

@@ -137,6 +137,8 @@ export class DoubleTapHandler {
       this._card.askQuestion.cancel();
       this._card.chat.clear();
       this._card.ui.clearNotificationStatusOverride();
+      // Resume any media playback paused when the notification started.
+      this._card.mediaPlayer.resumeAfterInterrupt();
 
       if (getSwitchState(this._card.hass, this._card.config.satellite_entity, 'wake_sound') !== false) {
         this._card.tts.playChime('done');

@@ -60,6 +60,11 @@ export class AnnouncementManager {
         return;
       }
 
+      // Resume any media playback paused at the start of the announcement.
+      // Skipped when another notification is queued — that one will keep
+      // playback paused via its own interrupt().
+      this._card.mediaPlayer.resumeAfterInterrupt();
+
       if (getSwitchState(this._card.hass, this._card.config.satellite_entity, 'wake_sound') !== false) {
         this._card.tts.playChime('done');
       }

@@ -25,6 +25,10 @@ export class MediaPlayerManager {
     this._muted = false;
     this._mediaId = null;
     this._volumeSynced = false;
+    // Set when interrupt() pauses for a voice interaction or notification.
+    // resumeAfterInterrupt() consumes it. Cleared on user-initiated stop/play
+    // so a manual stop is never silently undone later.
+    this._interruptedForResume = false;
 
     // Unified audio-state tracking (TTS, chimes, notifications)
     this._activeSources = new Set();
@@ -105,16 +109,91 @@ export class MediaPlayerManager {
 
   /**
    * Interrupt own playback (e.g. wake word barge-in, notification).
+   * Pauses the audio element rather than tearing it down so the
+   * subsequent resumeAfterInterrupt() can pick up from the same
+   * position. Reports 'paused' (not 'idle') so HA keeps
+   * media_content_id and user automations can distinguish a
+   * voice-interaction duck from a real stop.
    * Does NOT affect external audio sources - they manage themselves.
    */
   interrupt() {
-    if (!this._playing && !this._paused) return;
-    this._log.log('media-player', 'Interrupted');
-    this._cleanup();
-    if (this._activeSources.size === 0) {
-      this._reportState('idle');
-    }
+    if (!this._audio || !this._playing) return;
+    this._log.log('media-player', 'Interrupted (paused for resume)');
+    this._audio.pause();
+    this._playing = false;
+    this._paused = true;
+    this._interruptedForResume = true;
+    // Hand stop-word ownership over to the wake/TTS/notification flow that
+    // is about to take control. resumeAfterInterrupt() re-arms when we
+    // come back to plain media playback.
+    this._disarmStopWord();
+    this._reportState('paused');
   }
+
+  /**
+   * Resume playback that was paused by interrupt().  No-op unless
+   * we were the ones who paused. Called at the end of every path
+   * that returns the satellite to true idle (TTS-complete cleanup,
+   * pipeline errors that go back to IDLE, notification end).
+   */
+  resumeAfterInterrupt() {
+    if (!this._interruptedForResume) return;
+    this._interruptedForResume = false;
+    if (!this._audio || !this._paused) return;
+    this._log.log('media-player', 'Resuming after interrupt');
+    this._playing = true;
+    this._paused = false;
+    this._audio.play().then(() => {
+      this._reportState('playing');
+      this._armStopWord();
+    }).catch((e) => {
+      this._log.error('media-player', `Resume failed: ${e}`);
+      this._cleanup();
+      if (this._activeSources.size === 0) {
+        this._reportState('idle');
+      }
+    });
+  }
+  /**
+   * Public stop entry point so the wake-word "stop" handler can stop
+   * media playback the same way HA's media_stop service would.
+   */
+  stop() {
+    this._stop();
+  }
+
+  /**
+   * Re-arm the stop keyword if we should currently be listening for it.
+   * Called from paths that disable the stop model for their own reasons
+   * (timer dismiss, _onStopDetection top) so media keeps a stop-listener
+   * even after one of those paths cleared it.
+   */
+  refreshStopWord() {
+    if (this._playing) this._armStopWord();
+  }
+
+  /**
+   * Arm the stop keyword in shared mode (stop alongside wake words) so
+   * the user can both wake-word-interrupt media and say "stop" to halt
+   * it. enableStopModel/addKeyword are idempotent at the inference layer,
+   * so calling this when already armed is a no-op.
+   */
+  _armStopWord() {
+    this._card.wakeWord?.enableStopModel(false);
+  }
+
+  /**
+   * Disarm the stop keyword. Idempotent.
+   *
+   * Safe to call even when TTS / a notification has set stop-only mode:
+   * disableStopModel restores any suspended wake words. We only call
+   * this from paths that own the current stop-word state (play start /
+   * end, our own interrupt() / resumeAfterInterrupt()).
+   */
+  _disarmStopWord() {
+    this._card.wakeWord?.disableStopModel();
+  }
+
   /** Apply perceptual curve to raw volume (0-1). */
   _curved(raw) {
     return raw * raw;
@@ -151,6 +230,7 @@ export class MediaPlayerManager {
   async _play(data) {
     // Stop any current playback
     this._cleanup();
+    this._interruptedForResume = false;
 
     const { media_id, volume } = data;
     if (volume !== undefined && volume !== null) {
@@ -191,6 +271,7 @@ export class MediaPlayerManager {
         this._playing = false;
         this._paused = false;
         this._audio = null;
+        this._disarmStopWord();
         if (this._activeSources.size === 0) {
           this._reportState('idle');
         }
@@ -200,6 +281,7 @@ export class MediaPlayerManager {
         this._playing = false;
         this._paused = false;
         this._audio = null;
+        this._disarmStopWord();
         if (this._activeSources.size === 0) {
           this._reportState('idle');
         }
@@ -207,6 +289,7 @@ export class MediaPlayerManager {
       onStart: () => {
         this._log.log('media-player', `Playing: ${media_id}`);
         this._reportState('playing');
+        this._armStopWord();
       },
     });
   }
@@ -219,6 +302,8 @@ export class MediaPlayerManager {
     this._audio.pause();
     this._playing = false;
     this._paused = true;
+    this._interruptedForResume = false;
+    this._disarmStopWord();
     this._reportState('paused');
   }
 
@@ -227,7 +312,10 @@ export class MediaPlayerManager {
       this._reportState('idle');
       return;
     }
-    this._audio.play().catch((e) => {
+    this._interruptedForResume = false;
+    this._audio.play().then(() => {
+      this._armStopWord();
+    }).catch((e) => {
       this._log.error('media-player', `Resume failed: ${e}`);
       this._cleanup();
       this._reportState('idle');
@@ -238,6 +326,7 @@ export class MediaPlayerManager {
   }
 
   _stop() {
+    this._interruptedForResume = false;
     if (!this._audio) return;
     this._cleanup();
     if (this._activeSources.size === 0) {
@@ -292,6 +381,7 @@ export class MediaPlayerManager {
     }
     this._playing = false;
     this._paused = false;
+    this._disarmStopWord();
   }
 
   /**

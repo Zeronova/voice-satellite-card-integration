@@ -348,6 +348,9 @@ export function onTTSComplete(session, playbackFailed) {
     session._imageLingerTimeout = null;
     // User is actively browsing images - don't auto-dismiss
     if (session.ui.isLightboxVisible()) return;
+    // Resume any media playback we paused at wake-word time. Skipped above
+    // for the shouldContinue branch — that path stays paused for the next turn.
+    session.mediaPlayer.resumeAfterInterrupt();
     session.chat.clear();
     session.ui.hideBlurOverlay(BlurReason.PIPELINE);
     session.ui.updateForState(session.currentState, session.pipeline.serviceUnavailable, false);

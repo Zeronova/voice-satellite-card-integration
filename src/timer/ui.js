@@ -100,6 +100,9 @@ export function clearAlert(mgr) {
   mgr.alertActive = false;
 
   mgr.card.wakeWord?.disableStopModel();
+  // Re-arm stop word if media is playing in the background — disabling
+  // above clears it for everyone.
+  mgr.card.mediaPlayer?.refreshStopWord();
 
   // Stop chime loop
   if (_chimeInterval) {
