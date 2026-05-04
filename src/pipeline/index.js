@@ -195,6 +195,17 @@ export class PipelineManager {
       this._activeWakeWordSlot = opts.wake_word_slot;
     }
 
+    // Text-input variant: when intent_input is set, the backend skips the
+    // audio queue entirely and runs PipelineInput with start_stage=intent.
+    // No mic / no audio frames — just pipeline events flowing back.
+    if (opts.intent_input) {
+      runConfig.intent_input = opts.intent_input;
+    }
+    if (opts.pipeline_id) {
+      runConfig.pipeline_id = opts.pipeline_id;
+    }
+    const isTextInput = !!opts.intent_input;
+
     // Reset run-start tracking - used to detect stale run-end events
     this._runStartReceived = false;
     this._startStage = runConfig.start_stage;
@@ -245,6 +256,12 @@ export class PipelineManager {
         try { this._unsubscribe().catch(() => {}); } catch (_) { /* cleanup */ }
         this._unsubscribe = null;
       }
+      return;
+    }
+
+    if (isTextInput) {
+      this._log.log('pipeline', 'Text-input pipeline subscribed - awaiting events (no audio)');
+      this._isStreaming = false;
       return;
     }
 
@@ -541,6 +558,15 @@ export class PipelineManager {
   }
   finishRunEnd() {
     this._pendingRunEnd = false;
+
+    // Show is active (silent variant — no TTS playback, so onTTSComplete
+    // never fires). Bubble + rich media stay on screen until dismissed;
+    // ShowManager arms stop word + duration timer.
+    if (this._card.show?.active) {
+      this._log.log('pipeline', 'Show active - entering sticky mode (skipping cleanup)');
+      this._card.show.enterSticky();
+      return;
+    }
 
     // A linger timeout, video, or lightbox is active - let it handle cleanup
     if (this._card._imageLingerTimeout || this._card._videoPlaying || this._card.ui.isLightboxVisible()) {

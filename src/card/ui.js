@@ -357,6 +357,22 @@ export class UIManager {
     this._globalUI?.querySelector('.vs-rainbow-bar')?.classList.remove('visible');
   }
 
+  /**
+   * Pin the bar to a calm, non-reactive "listening" gradient flow with no
+   * mic-driven scaleY/glow. Used while a `voice_satellite.show` bubble is
+   * sticky on screen — the pipeline run is over so processing/speaking
+   * animations (or analyser-driven reactivity) would be misleading.
+   */
+  setBarSticky() {
+    if (!this._globalUI) return;
+    const bar = this._globalUI.querySelector('.vs-rainbow-bar');
+    if (!bar) return;
+    bar.classList.remove('processing', 'speaking', 'connecting', 'reactive');
+    bar.classList.add('visible', 'listening');
+    this._globalUI.classList.remove('reactive-mode');
+    this._card.analyser.stop();
+  }
+
 
   /**
    * Prepare UI for notification playback (bar enters speaking mode).

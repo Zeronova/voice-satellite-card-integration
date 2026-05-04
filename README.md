@@ -113,7 +113,7 @@ See the [Integration reference](docs/integration.md) for device entities, state 
 
 ## Usage & Services
 
-Once running, the satellite listens for the wake word, streams audio to STT, plays the TTS response, and supports natural multi-turn follow-ups with agents that allow it. It also exposes actions your automations can call: `assist_satellite.announce` for proactive TTS, `start_conversation` to ask a question and listen, `ask_question` to match the user's spoken reply against predefined answers, and `voice_satellite.wake` to trigger the satellite as if the wake word had fired.
+Once running, the satellite listens for the wake word, streams audio to STT, plays the TTS response, and supports natural multi-turn follow-ups with agents that allow it. It also exposes actions your automations can call: `assist_satellite.announce` for proactive TTS, `start_conversation` to ask a question and listen, `ask_question` to match the user's spoken reply against predefined answers, `voice_satellite.wake` to trigger the satellite as if the wake word had fired, and `voice_satellite.show` to run a prompt through the Assist pipeline on a schedule and pin the response (with any tool-call rich media) on screen until dismissed.
 
 See the [Usage & Services reference](docs/usage.md) for the full interaction flow and YAML examples for every action.
 

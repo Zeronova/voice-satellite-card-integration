@@ -417,6 +417,17 @@ export function onTTSComplete(session, playbackFailed) {
     return;
   }
 
+  // Show is active: bubble + rich media stay on screen until dismissed.
+  // ShowManager arms stop word + duration timer; cleanup runs from dismiss().
+  if (session.show?.active) {
+    session.logger.log('tts', 'Show active - entering sticky mode (skipping cleanup)');
+    if (!playbackFailed && getSwitchState(session.hass, session.config.satellite_entity, 'wake_sound') !== false) {
+      session.tts.playChime('done');
+    }
+    session.show.enterSticky();
+    return;
+  }
+
   // Continue conversation (only if TTS played successfully)
   if (!playbackFailed && session.pipeline.shouldContinue && session.pipeline.continueConversationId) {
     session.logger.log('pipeline', 'Continuing conversation - skipping wake word');
@@ -466,6 +477,7 @@ export function onTTSComplete(session, playbackFailed) {
     session.announcement.playQueued();
     session.askQuestion.playQueued();
     session.startConversation.playQueued();
+    session.show.playQueued();
   };
 
   // Mini-card hook: keep the text visible briefly while a compact marquee is

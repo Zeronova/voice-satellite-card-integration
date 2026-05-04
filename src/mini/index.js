@@ -62,6 +62,7 @@ export class VoiceSatelliteMiniCard extends HTMLElement {
   get announcement() { return this._session?.announcement; }
   get askQuestion() { return this._session?.askQuestion; }
   get startConversation() { return this._session?.startConversation; }
+  get show() { return this._session?.show; }
   get mediaPlayer() { return this._session?.mediaPlayer; }
   get connection() { return this._session?.connection; }
 

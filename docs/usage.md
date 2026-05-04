@@ -12,6 +12,7 @@ Day-to-day use of the satellite plus every service/action it exposes.
 - [Start Conversation](#start-conversation)
 - [Ask Question](#ask-question)
 - [Voice Satellite Wake Action](#voice-satellite-wake-action)
+- [Voice Satellite Show Action](#voice-satellite-show-action)
 - [Media Player](#media-player)
 
 ## Starting the Satellite
@@ -139,6 +140,77 @@ Common uses:
 - Older devices (e.g. Android 7-9) where always-on wake-word detection isn't viable
 
 > **Note:** The first manual wake on a fresh page load may require a prior user gesture in the tab to satisfy the browser's autoplay/permission policy. After that, the action works freely from any source.
+
+## Voice Satellite Show Action
+
+Run a prompt through the satellite's Assist pipeline as if the user had spoken it, then pin the response (with any tool-call rich media) on screen until dismissed. Designed for scheduled tasks like a morning briefing, a weather summary on motion, or a calendar peek when you walk into a room.
+
+```yaml
+action: voice_satellite.show
+target:
+  entity_id: assist_satellite.kitchen_tablet
+data:
+  prompt: "What's the weather forecast for today?"
+```
+
+When fired, the wake chime plays, the prompt runs through the satellite's pipeline (skipping the STT stage), and the LLM response appears in the standard assistant bubble. Tool-call rich media (weather, image, video, stocks, etc.) renders the same way it does for a wake-word interaction. The bubble stays on screen indefinitely until the user dismisses it (stop word, double-tap, or Escape).
+
+### Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `prompt` | `string` | (required) | Text sent to the Assist pipeline, as if the user had spoken it. |
+| `silent` | `boolean` | `true` | When `true`, only display the response. When `false`, also speak it through the pipeline's TTS engine. |
+| `pipeline` | `int` or `string` | `1` | Which pipeline runs the prompt. Pass `1` or `2` to use the matching wake-word slot's pipeline, or pass an exact pipeline name to override. |
+| `duration` | `int` (seconds) | `0` | Auto-dismiss after N seconds. `0` keeps the bubble on screen until manual dismissal. |
+
+### Examples
+
+All parameters set explicitly:
+
+```yaml
+action: voice_satellite.show
+target:
+  entity_id: assist_satellite.kitchen_tablet
+data:
+  prompt: "Show me the weather forecast for the day"
+  silent: false
+  pipeline: 1
+  duration: 60
+```
+
+Daily 8 AM weather forecast automation:
+
+```yaml
+alias: Morning weather forecast
+trigger:
+  - platform: time
+    at: "08:00:00"
+action:
+  - action: voice_satellite.show
+    target:
+      entity_id: assist_satellite.bedroom_tablet
+    data:
+      prompt: "Show me the weather forecast for the day"
+```
+
+### Dismissal
+
+While a show bubble is on screen the activity bar is pinned to a calm "listening" gradient (no mic-driven reactivity). Three ways to dismiss:
+
+- **Stop word** - say "stop" (requires *Stop word interruption* enabled in the side panel)
+- **Double-tap** anywhere on the screen, or press **Escape**
+- **Duration timer** - if `duration > 0`, the bubble auto-dismisses after that many seconds
+
+After dismissal the satellite plays a "done" chime, resumes any media that was paused, and goes back to wake-word listening.
+
+### Behavior notes
+
+- Requires a tool-capable conversation agent for rich media to render. With the built-in Home Assistant agent the response is plain text only.
+- If a voice interaction or another notification (`announce` / `start_conversation` / `ask_question`) is in progress when the show fires, it queues and plays after the current turn finishes.
+- If multiple shows arrive while the previous one is still on screen, the new one replaces the old.
+- If the browser tab is hidden when the show fires, it's queued and runs the moment the tab becomes visible.
+- Pipeline errors (LLM unreachable, intent failure, etc.) dismiss the show automatically and surface through the standard error toast.
 
 ## Media Player
 

@@ -50,6 +50,10 @@ export class UIBroadcastProxy {
     for (const c of this._cards) c.ui.hideBar();
   }
 
+  setBarSticky() {
+    for (const c of this._cards) c.ui.setBarSticky();
+  }
+
   onNotificationStart() {
     let wasVisible = false;
     for (const c of this._cards) {

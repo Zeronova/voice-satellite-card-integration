@@ -793,6 +793,17 @@ export class WakeWordManager {
   // ─── Stop model management ──────────────────────────────────────────
 
   /**
+   * Whether the inference engine is currently in stop-only mode (only the
+   * stop keyword is active, regular wake words suspended). Public getter
+   * so notification managers can guard against double-arming, which would
+   * clobber `_suspendedKeywords` and orphan the wake words.
+   * @returns {boolean}
+   */
+  isStopOnlyMode() {
+    return !!this._stopOnlyMode;
+  }
+
+  /**
    * Enable the stop keyword model for interruptible states.
    * @param {boolean} stopOnly - true for stop-only mode (TTS/notifications),
    *   false to add stop alongside regular wake words (timer alerts)
@@ -926,7 +937,16 @@ export class WakeWordManager {
       return;
     }
 
-    // 2. Notification playing (announcement / ask-question / start-conversation)
+    // 2a. Show is active (its own dismiss flow — uses PIPELINE blur and the
+    //     pipeline-driven assistant bubble, not announcement-style UI).
+    if (session.show?.active) {
+      this._log.log('stop-word', 'Dismissing show');
+      session.show.dismiss();
+      session.mediaPlayer.refreshStopWord();
+      return;
+    }
+
+    // 2b. Notification playing (announcement / ask-question / start-conversation)
     const isNotification = session.announcement.playing
       || session.askQuestion.playing
       || session.startConversation.playing

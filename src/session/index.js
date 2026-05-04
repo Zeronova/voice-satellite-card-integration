@@ -22,6 +22,7 @@ import { TimerManager } from '../timer';
 import { AnnouncementManager } from '../announcement';
 import { AskQuestionManager } from '../ask-question';
 import { StartConversationManager } from '../start-conversation';
+import { ShowManager } from '../show';
 import { MediaPlayerManager } from '../media-player';
 import { getSelectEntityId, getNumberState, getSelectState } from '../shared/satellite-state.js';
 import { ScreensaverManager } from '../screensaver';
@@ -106,6 +107,7 @@ export class VoiceSatelliteSession {
     this._announcement = new AnnouncementManager(this);
     this._askQuestion = new AskQuestionManager(this);
     this._startConversation = new StartConversationManager(this);
+    this._show = new ShowManager(this);
     this._mediaPlayer = new MediaPlayerManager(this);
     this._wakeWord = null;
     this._wakeWordLoading = false;
@@ -140,6 +142,7 @@ export class VoiceSatelliteSession {
   get announcement() { return this._announcement; }
   get askQuestion() { return this._askQuestion; }
   get startConversation() { return this._startConversation; }
+  get show() { return this._show; }
   get mediaPlayer() { return this._mediaPlayer; }
   get wakeWord() { return this._wakeWord; }
   get screensaver() { return this._screensaver; }

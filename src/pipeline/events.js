@@ -56,11 +56,19 @@ export function handleRunStart(mgr, eventData) {
   // When start_stage is 'stt' (on-device wake word), we're already in
   // WAKE_WORD_DETECTED — don't regress to LISTENING (which maps to idle
   // in HA and would cause automations to see a brief idle bounce).
-  if (mgr._startStage !== 'stt') {
+  // When start_stage is 'intent' (voice_satellite.show), the next event
+  // is intent-start which sets state to INTENT; setting LISTENING here
+  // would briefly hide the bar between run-start and intent-start.
+  if (mgr._startStage !== 'stt' && mgr._startStage !== 'intent') {
     mgr.card.setState(State.LISTENING);
   }
   mgr.log.log('pipeline', `Running - binary handler ID: ${mgr.binaryHandlerId}`);
-  mgr.log.log('pipeline', mgr._startStage === 'stt' ? 'Listening for speech...' : 'Listening for wake word...');
+  const phaseLabel = mgr._startStage === 'stt'
+    ? 'Listening for speech...'
+    : mgr._startStage === 'intent'
+      ? 'Awaiting intent (text input)...'
+      : 'Listening for wake word...';
+  mgr.log.log('pipeline', phaseLabel);
 }
 
 /** @param {import('./index.js').PipelineManager} mgr */
@@ -461,6 +469,18 @@ export function handleError(mgr, errorData) {
   const errorMessage = errorData.message || '';
 
   mgr.log.log('error', `${errorCode} - ${errorMessage}`);
+
+  // If a show was driving this run, dismiss it so subsequent onTTSComplete
+  // / finishRunEnd calls don't think a show is still active. Errors during
+  // a show take normal error UX (toast, restart) — sticky mode would hide
+  // the failure.
+  if (mgr.card.show?.active) {
+    mgr.log.log('error', 'Pipeline error during show — dismissing show');
+    // Skip done chime + pipeline restart: handleError owns both below
+    // (error chime / toast, then mgr.restart). Doing them twice would
+    // race or cause a duplicate restart.
+    mgr.card.show.dismiss({ skipDoneChime: true, skipPipelineRestart: true });
+  }
 
   // If an ask_question callback is pending, invoke it with empty string on error
   if (mgr.askQuestionCallback) {

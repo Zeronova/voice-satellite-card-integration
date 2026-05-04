@@ -102,6 +102,14 @@ export function dispatchSatelliteEvent(card, event) {
   // Dismiss screensaver on any incoming notification
   card.screensaver?.dismiss();
 
+  // show-trigger: voice_satellite.show service. ShowManager drives the
+  // pipeline directly using intent_input — no announcement-style playback,
+  // so it bypasses the _deliverToManager queue-and-play flow below.
+  if (type === 'show-trigger') {
+    card.show?.trigger(data);
+    return;
+  }
+
   const ann = { ...data };
 
   // Route to the correct manager based on event type / flags
