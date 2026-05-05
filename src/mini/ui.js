@@ -548,6 +548,7 @@ export class MiniUIManager {
   showServiceError() { /* no-op */ }
   clearServiceError() { /* no-op */ }
   hideBar() {}
+  setBarSticky() { /* mini card has no reactive bar */ }
 
   getTtsLingerTimeoutMs() {
     return 0;
