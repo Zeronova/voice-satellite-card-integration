@@ -11,6 +11,7 @@
  */
 
 import { WorkerProxyBackend } from './worker/proxy-backend.js';
+import { describeAudioInputDevices, describeSelectedAudioTrack } from '../audio/devices.js';
 
 const CHUNK_SIZE = 1280; // 80ms @ 16 kHz
 const TARGET_RATE = 16000;
@@ -73,6 +74,8 @@ export class WakeWordTestSession {
     this._rmsHistory = new Float32Array(25); // ~2 s at 80 ms/chunk
     this._rmsHistoryHead = 0;
     this._rmsHistoryFilled = 0;
+    this._micHealth = null;
+    this._micHealthTimer = null;
   }
 
   /**
@@ -171,6 +174,7 @@ export class WakeWordTestSession {
     await this._setupAudioContext();
     await this._setupWorklet();
     await this._setupInference();
+    this._startMicHealthProbe();
 
     this._running = true;
     // Park a convenience pointer on window so a user can trigger a capture
@@ -203,6 +207,7 @@ export class WakeWordTestSession {
       try { await this._audioContext.close(); } catch (_) {}
       this._audioContext = null;
     }
+    this._stopMicHealthProbe();
 
     if (this._isolatedRunner) {
       try { this._isolatedRunner.cleanUp?.(); } catch (_) {}
@@ -282,9 +287,10 @@ export class WakeWordTestSession {
     if (requested.voiceIsolation) {
       audioConstraints.advanced = [{ voiceIsolation: true }];
     }
-    this._stream = await navigator.mediaDevices.getUserMedia({
-      audio: audioConstraints,
-    });
+    if (c.deviceId && c.deviceId !== 'default') {
+      audioConstraints.deviceId = { exact: c.deviceId };
+    }
+    this._stream = await this._getUserMediaWithDeviceFallback(audioConstraints, c.deviceId);
 
     // Surface both the requested DSP toggles and what the browser actually
     // applied, so the user can see at a glance whether their mic driver
@@ -301,6 +307,8 @@ export class WakeWordTestSession {
       if (track) {
         const s = track.getSettings() || {};
         const label = track.label ? ` "${track.label}"` : '';
+        this._emitLog('info', describeSelectedAudioTrack(track));
+        this._emitLog('info', await describeAudioInputDevices(track));
         this._emitLog(
           'info',
           `DSP applied:   EC=${!!s.echoCancellation} NS=${!!s.noiseSuppression} `
@@ -405,6 +413,7 @@ export class WakeWordTestSession {
     if (this._actualSampleRate !== TARGET_RATE) {
       s = this._resample(samples, this._actualSampleRate, TARGET_RATE);
     }
+    this._recordMicHealthChunk(s);
 
     // Ring-buffer the post-resample samples so `exportCapture()` can write
     // out the exact signal the frontend saw.
@@ -533,6 +542,18 @@ export class WakeWordTestSession {
     };
   }
 
+  async _getUserMediaWithDeviceFallback(audioConstraints, requestedDeviceId) {
+    try {
+      return await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+    } catch (err) {
+      if (!audioConstraints.deviceId) throw err;
+      this._emitLog('warn', `Selected microphone unavailable (${requestedDeviceId}) - falling back to browser default: ${err?.message || err}`);
+      const fallbackConstraints = Object.assign({}, audioConstraints);
+      delete fallbackConstraints.deviceId;
+      return navigator.mediaDevices.getUserMedia({ audio: fallbackConstraints });
+    }
+  }
+
   _getPerfStageStats() {
     const sums = {};
     const counts = {};
@@ -593,6 +614,60 @@ export class WakeWordTestSession {
     this._rmsHistory.fill(0);
     this._rmsHistoryHead = 0;
     this._rmsHistoryFilled = 0;
+  }
+
+  _startMicHealthProbe() {
+    this._stopMicHealthProbe();
+    this._micHealth = {
+      startedAt: Date.now(),
+      chunks: 0,
+      peakRms: 0,
+      peakAbs: 0,
+      reports: 0,
+    };
+    this._micHealthTimer = setInterval(() => this._reportMicHealth(), 3000);
+  }
+
+  _stopMicHealthProbe() {
+    if (this._micHealthTimer) {
+      clearInterval(this._micHealthTimer);
+      this._micHealthTimer = null;
+    }
+    this._micHealth = null;
+  }
+
+  _recordMicHealthChunk(samples) {
+    if (!this._micHealth || !samples?.length) return;
+    let sumSq = 0;
+    let peakAbs = 0;
+    for (let i = 0; i < samples.length; i++) {
+      const v = samples[i];
+      const a = Math.abs(v);
+      if (a > peakAbs) peakAbs = a;
+      sumSq += v * v;
+    }
+    const rms = Math.sqrt(sumSq / samples.length);
+    this._micHealth.chunks += 1;
+    if (rms > this._micHealth.peakRms) this._micHealth.peakRms = rms;
+    if (peakAbs > this._micHealth.peakAbs) this._micHealth.peakAbs = peakAbs;
+  }
+
+  _reportMicHealth() {
+    const h = this._micHealth;
+    if (!h) return;
+    h.reports += 1;
+    const elapsed = Math.max(1, Date.now() - h.startedAt);
+    const chunksPerSecond = h.chunks / (elapsed / 1000);
+    const track = this._stream?.getAudioTracks?.()[0];
+    const trackBits = track
+      ? `track=${track.readyState} enabled=${track.enabled} muted=${track.muted}`
+      : 'track=none';
+    const msg = `mic health: chunks=${h.chunks} (${chunksPerSecond.toFixed(1)}/s) `
+      + `peak_rms=${h.peakRms.toFixed(4)} peak_abs=${h.peakAbs.toFixed(4)} `
+      + `${trackBits} ctx=${this._audioContext?.state || 'none'}`;
+    this._emitLog('diag', h.chunks === 0 || h.peakRms < 0.001
+      ? `${msg} - input appears silent`
+      : msg);
   }
 
   _recordRmsSample(rms) {

@@ -66,7 +66,40 @@ export const microphoneSchema = [
 
 export const autoStartSchema = [
   { name: 'auto_start', default: true, selector: { boolean: {} } },
+  {
+    name: 'microphone_device_id',
+    default: 'default',
+    required: true,
+    selector: {
+      select: {
+        options: [{ value: 'default', label: 'Browser default microphone' }],
+        mode: 'dropdown',
+        custom_value: false,
+      },
+    },
+  },
 ];
+
+export function buildAutoStartSchema(microphoneOptions = []) {
+  const options = microphoneOptions.length
+    ? microphoneOptions
+    : [{ value: 'default', label: 'Browser default microphone' }];
+  return [
+    { name: 'auto_start', default: true, selector: { boolean: {} } },
+    {
+      name: 'microphone_device_id',
+      default: 'default',
+      required: true,
+      selector: {
+        select: {
+          options,
+          mode: 'dropdown',
+          custom_value: false,
+        },
+      },
+    },
+  ];
+}
 
 export const debugSchema = [
   { name: 'debug', selector: { boolean: {} } },
@@ -89,6 +122,7 @@ export const timersSchema = [
 export const behaviorLabels = {
   satellite_entity: t(null, 'editor.behavior.satellite_entity', 'Satellite entity'),
   auto_start: t(null, 'editor.behavior.auto_start', 'Auto start'),
+  microphone_device_id: t(null, 'editor.behavior.microphone_device_id', 'Microphone'),
   debug: t(null, 'editor.behavior.debug', 'Debug logging'),
   hide_timer_pills: t(null, 'editor.behavior.hide_timer_pills', 'Hide on-screen countdown'),
   show_timer_name_in_pill: t(null, 'editor.behavior.show_timer_name_in_pill', 'Show timer name inside pill'),
@@ -110,6 +144,7 @@ export const behaviorLabels = {
 export const behaviorHelpers = {
   satellite_entity: t(null, 'editor.behavior.helper_satellite_entity', 'Add a satellite device first via Settings → Devices & Services → Voice Satellite.'),
   auto_start: t(null, 'editor.behavior.helper_auto_start', 'Automatically start the voice engine when the page loads. When off, use the Start button to activate manually.'),
+  microphone_device_id: t(null, 'editor.behavior.helper_microphone_device_id', 'Use the browser default microphone, or select a specific input if the default device is silent or wrong.'),
   wake_word_voice_isolation: t(null, 'editor.behavior.helper_voice_isolation', 'AI-based voice isolation, currently only available in Chrome'),
   stt_voice_isolation: t(null, 'editor.behavior.helper_voice_isolation', 'AI-based voice isolation, currently only available in Chrome'),
   hide_timer_pills: t(null, 'editor.behavior.helper_hide_timer_pills', 'Hide the countdown pill on screen. Timers still run and the alert still fires when they finish.'),

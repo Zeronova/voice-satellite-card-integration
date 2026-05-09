@@ -7,6 +7,7 @@
 
 import { setupAudioWorklet, sendAudioBuffer } from './processing.js';
 import { resolveDspForMode } from './dsp-config.js';
+import { describeAudioInputDevices, describeSelectedAudioTrack } from './devices.js';
 
 const TARGET_SAMPLE_RATE = 16000;
 
@@ -23,6 +24,7 @@ export class AudioManager {
     this._sendInterval = null;
     this._actualSampleRate = TARGET_SAMPLE_RATE;
     this._sendSessionCount = 0;
+    this._silentGainNode = null;
     // Authoritative mute flag — separate from any specific MediaStreamTrack
     // so a stream swap (switchMicMode) can re-apply it to the new tracks
     // without racing the wake-word handler's synchronous mute call.
@@ -54,6 +56,7 @@ export class AudioManager {
   get audioBuffer() { return this._audioBuffer; }
   set audioBuffer(val) { this._audioBuffer = val; }
   get actualSampleRate() { return this._actualSampleRate; }
+  get currentMicMode() { return this._currentMicMode || 'wake_word'; }
   /**
    * Acquire the mic.  `mode` selects which DSP config group applies — the
    * panel exposes separate toggles for wake-word listening vs. STT
@@ -82,9 +85,7 @@ export class AudioManager {
       audioConstraints.advanced = [{ voiceIsolation: true }];
     }
 
-    this._mediaStream = await navigator.mediaDevices.getUserMedia({
-      audio: audioConstraints,
-    });
+    this._mediaStream = await this._getUserMediaWithDeviceFallback(audioConstraints, mode);
 
     if (config.debug) {
       const tracks = this._mediaStream.getAudioTracks();
@@ -93,6 +94,7 @@ export class AudioManager {
         this._log.log('mic', `Track settings: ${JSON.stringify(tracks[0].getSettings())}`);
       }
     }
+    await this._logMicDevices('initial');
 
     this._sourceNode = this._audioContext.createMediaStreamSource(this._mediaStream);
     this._actualSampleRate = this._audioContext.sampleRate;
@@ -135,6 +137,7 @@ export class AudioManager {
       autoGainControl: dsp.autoGainControl,
     };
     if (dsp.voiceIsolation) audioConstraints.advanced = [{ voiceIsolation: true }];
+    this._applyConfiguredDevice(audioConstraints);
 
     // Acquire the new stream BEFORE tearing the old one down so the old
     // sourceNode keeps feeding the analyser (reactive bar) and the worklet
@@ -144,7 +147,7 @@ export class AudioManager {
     // connect, well under one audio render quantum.
     let nextStream;
     try {
-      nextStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+      nextStream = await this._getUserMediaWithDeviceFallback(audioConstraints, mode);
     } catch (e) {
       this._log.error('mic', `switchMicMode getUserMedia failed: ${e.message || e}`);
       return;
@@ -203,6 +206,7 @@ export class AudioManager {
     this._mediaStream = nextStream;
     this._sourceNode = nextSource;
     this._currentMicMode = mode;
+    await this._logMicDevices(`switch:${mode}`);
   }
 
   stopMicrophone() {
@@ -212,6 +216,10 @@ export class AudioManager {
     if (this._workletNode) {
       this._workletNode.disconnect();
       this._workletNode = null;
+    }
+    if (this._silentGainNode) {
+      try { this._silentGainNode.disconnect(); } catch (_) {}
+      this._silentGainNode = null;
     }
     if (this._sourceNode) {
       this._card.analyser.detachMic(this._sourceNode);
@@ -275,6 +283,33 @@ export class AudioManager {
     if (this._sendInterval) {
       clearInterval(this._sendInterval);
       this._sendInterval = null;
+    }
+  }
+
+  async _logMicDevices(reason) {
+    const track = this._mediaStream?.getAudioTracks?.()[0] || null;
+    this._log.log('mic', `${describeSelectedAudioTrack(track)} reason=${reason}`);
+    this._log.log('mic', await describeAudioInputDevices(track));
+  }
+
+  async _getUserMediaWithDeviceFallback(audioConstraints, mode) {
+    this._applyConfiguredDevice(audioConstraints);
+    try {
+      return await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+    } catch (err) {
+      if (!audioConstraints.deviceId) throw err;
+      const requested = this._card.config?.microphone_device_id;
+      this._log.log('mic', `Selected microphone unavailable (${requested}) for ${mode}: ${err?.message || err}; falling back to browser default`);
+      const fallbackConstraints = Object.assign({}, audioConstraints);
+      delete fallbackConstraints.deviceId;
+      return navigator.mediaDevices.getUserMedia({ audio: fallbackConstraints });
+    }
+  }
+
+  _applyConfiguredDevice(audioConstraints) {
+    const deviceId = this._card.config?.microphone_device_id;
+    if (deviceId && deviceId !== 'default') {
+      audioConstraints.deviceId = { exact: deviceId };
     }
   }
 

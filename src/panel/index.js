@@ -21,7 +21,7 @@ import {
 import { DEFAULT_CONFIG, State, VERSION } from '../constants.js';
 import { renderPreview } from '../editor/preview.js';
 import {
-  behaviorSchema, entitySchema, autoStartSchema, microphoneSchema, debugSchema, timersSchema,
+  behaviorSchema, entitySchema, buildAutoStartSchema, microphoneSchema, debugSchema, timersSchema,
   behaviorLabels, behaviorHelpers,
 } from '../editor/behavior.js';
 import { skinSchema, skinLabels, skinHelpers } from '../editor/skin.js';
@@ -34,6 +34,7 @@ import { getSelectOptions, getSelectAttribute, getSelectState, getSwitchState } 
 import { DiagnosticsManager } from '../diagnostics';
 import { buildMarkdownReport } from '../diagnostics/report.js';
 import { exportLogBufferText } from '../logger.js';
+import { getAudioInputDeviceOptions } from '../audio/devices.js';
 
 const P = 'vsp';
 const CONFIG_KEY = 'vs-panel-config';
@@ -172,6 +173,8 @@ class VoiceSatellitePanel extends HTMLElement {
     this._statusInterval = null;
     this._rendered = false;
     this._formLoaded = false;
+    this._microphoneOptions = [{ value: 'default', label: 'Browser default microphone' }];
+    this._deviceChangeHandler = null;
     this._config = Object.assign({}, DEFAULT_CONFIG, getStoredConfig());
     // Migrate legacy unified DSP keys into the STT group.
     const LEGACY_DSP_KEYS = ['noise_suppression', 'echo_cancellation', 'auto_gain_control', 'voice_isolation'];
@@ -268,6 +271,8 @@ class VoiceSatellitePanel extends HTMLElement {
       this._buildDom();
     }
     this._statusInterval = setInterval(() => this._updateStatus(), 1000);
+    this._deviceChangeHandler = () => this._refreshMicrophoneOptions();
+    navigator.mediaDevices?.addEventListener?.('devicechange', this._deviceChangeHandler);
   }
 
   disconnectedCallback() {
@@ -279,6 +284,10 @@ class VoiceSatellitePanel extends HTMLElement {
     if (this._testerPopulateInterval) {
       clearInterval(this._testerPopulateInterval);
       this._testerPopulateInterval = null;
+    }
+    if (this._deviceChangeHandler) {
+      navigator.mediaDevices?.removeEventListener?.('devicechange', this._deviceChangeHandler);
+      this._deviceChangeHandler = null;
     }
     // Tear down the standalone tester session if active so the mic is
     // released when the user navigates away from the panel. If we paused
@@ -393,6 +402,10 @@ class VoiceSatellitePanel extends HTMLElement {
   _onSettingsChange(newData) {
     const prevScreensaverType = this._config.screensaver_type;
     const prevScreensaverEnabled = this._config.screensaver_enabled;
+    if (Object.prototype.hasOwnProperty.call(newData, 'microphone_device_id')
+        && !newData.microphone_device_id) {
+      newData.microphone_device_id = 'default';
+    }
     Object.assign(this._config, newData);
     setStoredConfig(this._config);
 
@@ -1708,6 +1721,24 @@ class VoiceSatellitePanel extends HTMLElement {
     await this._copyText(md, copy, 'Copied');
   }
 
+  async _refreshMicrophoneOptions() {
+    const nextOptions = await getAudioInputDeviceOptions();
+    const same = JSON.stringify(nextOptions) === JSON.stringify(this._microphoneOptions);
+    this._microphoneOptions = nextOptions;
+
+    const validValues = new Set(nextOptions.map((o) => o.value));
+    if (!validValues.has(this._config.microphone_device_id)) {
+      this._config.microphone_device_id = 'default';
+      setStoredConfig(this._config);
+    }
+
+    const autostartForm = this.querySelector(`.${P}-autostart-container ha-form`);
+    if (autostartForm) {
+      autostartForm.data = Object.assign({}, this._config);
+      if (!same) autostartForm.schema = buildAutoStartSchema(this._microphoneOptions);
+    }
+  }
+
   async _copySessionLogs() {
     const copy = this.querySelector(`.${P}-diag-copy-logs`);
     const lines = [
@@ -2000,6 +2031,7 @@ class VoiceSatellitePanel extends HTMLElement {
           noiseSuppression: dsp.noiseSuppression === true,
           autoGainControl: dsp.autoGainControl === true,
           voiceIsolation: dsp.voiceIsolation === true,
+          deviceId: this._config.microphone_device_id || 'default',
         },
       });
 
@@ -2321,6 +2353,7 @@ class VoiceSatellitePanel extends HTMLElement {
       return;
     }
     this._formLoaded = true;
+    await this._refreshMicrophoneOptions();
 
     // Entity picker
     const entityContainer = this.querySelector(`.${P}-entity-container`);
@@ -2347,7 +2380,7 @@ class VoiceSatellitePanel extends HTMLElement {
       const autostartForm = document.createElement('ha-form');
       autostartForm.hass = this._hass;
       autostartForm.data = Object.assign({}, this._config);
-      autostartForm.schema = autoStartSchema;
+      autostartForm.schema = buildAutoStartSchema(this._microphoneOptions);
       autostartForm.computeLabel = (s) => allLabels[s.name] || '';
       autostartForm.computeHelper = (s) => allHelpers[s.name] || '';
       autostartForm.addEventListener('value-changed', (e) => this._onSettingsChange(e.detail.value));

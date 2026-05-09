@@ -323,6 +323,7 @@ export class VoiceSatelliteSession {
    */
   updateConfig(config, { fromPanel } = {}) {
     if (!config) return;
+    if (!config.microphone_device_id) config.microphone_device_id = 'default';
     // Panel config keys the session cares about.  Changes to any `micKeys`
     // entry trigger a mic restart so constraint updates take effect live.
     const micKeys = [
@@ -337,6 +338,8 @@ export class VoiceSatelliteSession {
       // mode, so live toggle changes rebind the wake-word stream).
       'stt_echo_cancellation', 'stt_noise_suppression',
       'stt_auto_gain_control', 'stt_voice_isolation',
+      // Browser input device.
+      'microphone_device_id',
     ];
     const sessionKeys = [
       'satellite_entity', 'debug',
@@ -373,8 +376,9 @@ export class VoiceSatelliteSession {
     // Restart mic if audio constraints changed while running
     if (micChanged && this._hasStarted && this._audio._mediaStream) {
       this._logger.log('session', 'Mic constraints changed - restarting mic');
+      const mode = this._audio.currentMicMode || 'wake_word';
       this._audio.stopMicrophone();
-      this._audio.startMicrophone().catch((e) => {
+      this._audio.startMicrophone(mode).catch((e) => {
         this._logger.error('session', `Mic restart failed: ${e.message || e}`);
       });
     }

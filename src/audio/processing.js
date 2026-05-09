@@ -83,6 +83,7 @@ export async function setupAudioWorklet(mgr, sourceNode) {
   // without routing mic audio to speakers (which would cause feedback).
   const silentGain = mgr.audioContext.createGain();
   silentGain.gain.value = 0;
+  mgr._silentGainNode = silentGain;
   mgr.workletNode.connect(silentGain);
   silentGain.connect(mgr.audioContext.destination);
 }
