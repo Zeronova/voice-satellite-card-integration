@@ -408,6 +408,7 @@ function indexGraphForGpu(graph, inputName, outputName, inputShape) {
         break;
       }
       case 'Identity':
+      case 'LayerNormalization':
       case 'Log':
       case 'LeakyRelu':
       case 'Relu':
@@ -576,6 +577,13 @@ function executeNode(node, state) {
       intAttr(node, 'transB', 0) !== 0,
     ));
     case 'ReduceMean': return setOutput(state, node, opReduceMean(getTensor(state, node.inputs[0]), intsAttr(node, 'axes'), intAttr(node, 'keepdims', 1) !== 0));
+    case 'LayerNormalization': return setOutput(state, node, opLayerNormalization(
+      getTensor(state, node.inputs[0]),
+      getTensor(state, node.inputs[1]),
+      getOptionalTensor(state, node.inputs[2]),
+      intAttr(node, 'axis', -1),
+      floatAttr(node, 'epsilon', 1e-5),
+    ));
     case 'Add': return setOutput(state, node, opBroadcast(getTensor(state, node.inputs[0]), getTensor(state, node.inputs[1]), (a, b) => a + b));
     case 'Sub': return setOutput(state, node, opBroadcast(getTensor(state, node.inputs[0]), getTensor(state, node.inputs[1]), (a, b) => a - b));
     case 'Mul': return setOutput(state, node, opBroadcast(getTensor(state, node.inputs[0]), getTensor(state, node.inputs[1]), (a, b) => a * b));
@@ -889,6 +897,44 @@ function opReduceMean(input, axes, keepdims) {
   }
   for (let i = 0; i < out.length; i++) out[i] /= counts[i] || 1;
   return { shape: finalShape, data: out };
+}
+
+function opLayerNormalization(input, scale, bias, axis, epsilon) {
+  const rank = input.shape.length;
+  const normAxis = axis < 0 ? axis + rank : axis;
+  if (normAxis < 0 || normAxis >= rank) {
+    throw new Error(`LayerNormalization axis ${axis} is invalid for shape ${input.shape}`);
+  }
+  const outer = product(input.shape.slice(0, normAxis));
+  const inner = product(input.shape.slice(normAxis));
+  if (scale.data.length !== inner && scale.data.length !== 1) {
+    throw new Error(`LayerNormalization scale length ${scale.data.length} does not match normalized size ${inner}`);
+  }
+  if (bias && bias.data.length !== inner && bias.data.length !== 1) {
+    throw new Error(`LayerNormalization bias length ${bias.data.length} does not match normalized size ${inner}`);
+  }
+  const out = new Float32Array(input.data.length);
+  const x = input.data;
+  const gamma = scale.data;
+  const beta = bias?.data || null;
+  for (let o = 0; o < outer; o++) {
+    const base = o * inner;
+    let mean = 0;
+    for (let i = 0; i < inner; i++) mean += x[base + i];
+    mean /= inner;
+    let variance = 0;
+    for (let i = 0; i < inner; i++) {
+      const d = x[base + i] - mean;
+      variance += d * d;
+    }
+    const invStd = 1 / Math.sqrt(variance / inner + epsilon);
+    for (let i = 0; i < inner; i++) {
+      out[base + i] = (x[base + i] - mean) * invStd
+        * gamma[gamma.length === 1 ? 0 : i]
+        + (beta ? beta[beta.length === 1 ? 0 : i] : 0);
+    }
+  }
+  return { shape: input.shape.slice(), data: out };
 }
 
 function opUnary(input, fn) {

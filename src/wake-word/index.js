@@ -102,6 +102,7 @@ export class WakeWordManager {
     this._loadedModelsKey = null; // sorted model names string for change detection
     this._processing = false;
     this._frameQueue = [];
+    this._streamResetPending = false;
 
     // Runtime compatibility token (cached)
     this._tfweb = null;
@@ -634,16 +635,25 @@ export class WakeWordManager {
     // Cap queue depth - if inference can't keep up, drop oldest frames rather
     // than letting memory grow unbounded.  50 frames ≈ 4s of audio at 80ms each.
     const MAX_QUEUE = 50;
+    let droppedFrames = 0;
     while (this._sampleBufLen >= CHUNK_SIZE) {
       if (this._frameQueue.length >= MAX_QUEUE) {
         const dropped = this._frameQueue.shift();
         if (this._framePool.length < MAX_POOL) this._framePool.push(dropped);
+        droppedFrames++;
       }
       const buf = this._framePool.pop() || new Float32Array(CHUNK_SIZE);
       buf.set(this._sampleBuf.subarray(0, CHUNK_SIZE));
       this._frameQueue.push(buf);
       this._sampleBuf.copyWithin(0, CHUNK_SIZE, this._sampleBufLen);
       this._sampleBufLen -= CHUNK_SIZE;
+    }
+    if (droppedFrames > 0) {
+      this._streamResetPending = true;
+      this._log.log(
+        'wake-word',
+        `Inference queue overflow - dropped ${droppedFrames} frame(s), stream state will reset`,
+      );
     }
 
     this._drainQueue();
@@ -659,6 +669,10 @@ export class WakeWordManager {
 
     try {
       while (this._frameQueue.length > 0 && (this._active || this._stopOnlyMode)) {
+        if (this._streamResetPending) {
+          this._streamResetPending = false;
+          if (this._inference?.reset) this._inference.reset();
+        }
         const frame = this._frameQueue.shift();
         const result = await this._inference.processChunk(frame);
         if (this._framePool.length < MAX_POOL) this._framePool.push(frame);

@@ -40,19 +40,25 @@ const COOLDOWN_MS = 2000;
 // upstream openWakeWord.  Averaging before thresholding made low-SNR/noisy
 // wake words miss when they produced one strong frame surrounded by weaker
 // frames.
-// Buffer recent raw audio while the optional energy gate sleeps.  MWW
-// keeps feature lookback for the same reason: the chunk that wakes the
-// gate may already be partway through the wake phrase.
-const SLEEP_BUFFER_CHUNKS = 8; // ~640 ms
-// Borderline-confirmation gate, mirrored from microWakeWord
-// (micro-inference.js _shouldTriggerKeyword).  Current frame scores
-// strictly above (cutoff + margin) fire immediately.  Scores in the
-// narrow (cutoff, cutoff + margin] band must repeat within
-// BORDERLINE_CONFIRM_WINDOW_MS to fire - otherwise the candidate is
-// dropped.  Catches the "ok google" → ok_nabu pattern where one
-// chunk's score grazes cutoff before fading.
+// Buffer recent raw audio while the optional energy gate sleeps. OWW's
+// classifier consumes 16 embeddings (~1.28 s), so keep a full classifier
+// window. When the gate wakes after a reset, replay can rebuild coherent
+// context instead of mixing stale pre-sleep embeddings with new audio.
+const SLEEP_BUFFER_CHUNKS = 16; // ~1.28 s
+// Confirmation gate. For wake words, any score above cutoff must repeat
+// within the confirmation window; this filters one-frame TV/noise spikes.
+// The confirming wake hit must also be delayed enough to let the rest of
+// the phrase arrive; otherwise a strong prefix like "hey ja" can confirm on
+// the very next 80 ms frame before "arvis" is spoken.
+// The stop model keeps the old immediate high-score behavior for latency.
+// Scores in the narrow (cutoff, cutoff + margin] band always require
+// confirmation.
 const BORDERLINE_CONFIRM_MARGIN = 0.03;
+const WAKE_CONFIRM_MIN_DELAY_MS = 320;
 const BORDERLINE_CONFIRM_WINDOW_MS = 750;
+// Training TODO: add prefix-only hard negatives for OWW wake words too
+// (for example "hey ja", "hey jar", "ok na") so partial phrases are rejected
+// by the model itself instead of relying only on runtime confirmation.
 
 function nowMs() {
   return (typeof performance !== 'undefined' && typeof performance.now === 'function')
@@ -213,6 +219,22 @@ export class OwwBackend {
     return out;
   }
 
+  _clearScoreWindows() {
+    for (const name of this._keywordNames) {
+      const w = this._scoreWindows[name];
+      if (!w) continue;
+      w.pendingConfirm = false;
+      w.pendingConfirmAt = 0;
+      w.pendingConfirmScore = 0;
+    }
+  }
+
+  _resetStreamState() {
+    this._latestScores = {};
+    this._clearScoreWindows();
+    this._inference?.reset?.();
+  }
+
   /**
    * Process one 1280-sample chunk of normalized ±1 float32 audio
    * (the format coming out of the AudioWorklet).  Internally we scale
@@ -272,6 +294,7 @@ export class OwwBackend {
           this._silentChunks++;
           if (this._silentChunks >= SLEEP_CHUNKS) {
             this._sleeping = true;
+            this._resetStreamState();
             this._log?.log?.('wake-word', `OWW sleep - inference paused (rms=${rms.toFixed(4)})`);
           }
         } else {
@@ -388,9 +411,10 @@ export class OwwBackend {
   }
 
   /**
-   * Per-keyword borderline-confirm gate, run on the current frame score.
+   * Per-keyword confirmation gate, run on the current frame score.
    *   - score <= cutoff               → no trigger, clear pending
-   *   - score >= cutoff + margin      → 'immediate', clear pending
+   *   - wake score > cutoff           → require a second hit in-window
+   *   - stop score >= cutoff + margin → 'immediate', clear pending
    *   - cutoff < score < cutoff+margin (borderline):
    *       * if a fresh pending exists for this keyword → 'confirmed', clear
    *       * else park as pending, no trigger
@@ -404,33 +428,39 @@ export class OwwBackend {
       w.pendingConfirmScore = 0;
       return null;
     }
-    if (score >= cutoff + BORDERLINE_CONFIRM_MARGIN) {
+    const highConfidence = score >= cutoff + BORDERLINE_CONFIRM_MARGIN;
+    if (name === 'stop' && highConfidence) {
       w.pendingConfirm = false;
       w.pendingConfirmAt = 0;
       w.pendingConfirmScore = 0;
       return 'immediate';
     }
-    // Borderline band
+    // Wake-word scores and stop borderline scores require confirmation.
     if (w.pendingConfirm && (now - w.pendingConfirmAt) <= BORDERLINE_CONFIRM_WINDOW_MS) {
+      const ageMs = now - w.pendingConfirmAt;
+      if (name !== 'stop' && ageMs < WAKE_CONFIRM_MIN_DELAY_MS) {
+        w.pendingConfirmScore = Math.max(w.pendingConfirmScore, score);
+        return null;
+      }
       const firstScore = w.pendingConfirmScore;
       w.pendingConfirm = false;
       w.pendingConfirmAt = 0;
       w.pendingConfirmScore = 0;
       this._log?.log?.(
         'wake-word',
-        `OWW borderline confirm passed: ${name} first=${firstScore.toFixed(3)} second=${score.toFixed(3)} cutoff=${cutoff.toFixed(3)}`,
+        `OWW borderline confirm passed: ${name} first=${firstScore.toFixed(3)} second=${score.toFixed(3)} age=${ageMs.toFixed(0)}ms cutoff=${cutoff.toFixed(3)}`,
       );
       return 'confirmed';
     }
     if (w.pendingConfirm) {
       this._log?.log?.(
         'wake-word',
-        `OWW borderline confirm expired: ${name} second=${score.toFixed(3)} cutoff=${cutoff.toFixed(3)}`,
+        `OWW confirm expired: ${name} second=${score.toFixed(3)} cutoff=${cutoff.toFixed(3)}`,
       );
     } else {
       this._log?.log?.(
         'wake-word',
-        `OWW borderline candidate parked: ${name} score=${score.toFixed(3)} cutoff=${cutoff.toFixed(3)}`,
+        `OWW confirm candidate parked: ${name} score=${score.toFixed(3)} cutoff=${cutoff.toFixed(3)}`,
       );
     }
     w.pendingConfirm = true;
@@ -526,15 +556,8 @@ export class OwwBackend {
     );
   }
   reset() {
-    this._latestScores = {};
     this._lastTriggerAt = 0;
-    for (const name of this._keywordNames) {
-      const w = this._scoreWindows[name];
-      if (!w) continue;
-      w.pendingConfirm = false;
-      w.pendingConfirmAt = 0;
-      w.pendingConfirmScore = 0;
-    }
+    this._resetStreamState();
     // Reset gate to sleeping so the next chunk has to cross the wake
     // threshold before inference resumes - prevents post-pause stale
     // chunks (e.g. residual room noise) from triggering before fresh
@@ -542,12 +565,6 @@ export class OwwBackend {
     this._sleeping = true;
     this._silentChunks = SLEEP_CHUNKS;
     this._clearSleepBuffer();
-    // Critical: clear the inference's internal audio history + 16-frame
-    // feature buffer.  Without this the classifier sees stale embeddings
-    // from around the previous wake-word detection and re-fires within
-    // immediately after resume - the post-STT self-trigger loop the user
-    // hits when STT errors out.
-    this._inference?.reset?.();
   }
 
   /**
@@ -561,6 +578,7 @@ export class OwwBackend {
       this._sleeping = false;
       this._silentChunks = 0;
       this._clearSleepBuffer();
+      this._resetStreamState();
       this._log?.log?.(
         'wake-word',
         `OWW energy gate ${this._energyGateEnabled ? 'enabled' : 'disabled'}`,
