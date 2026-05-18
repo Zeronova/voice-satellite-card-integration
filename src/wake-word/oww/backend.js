@@ -62,21 +62,19 @@ const BORDERLINE_CONFIRM_MARGIN = 0.03;
 const WAKE_CONFIRM_MIN_FRAMES = 1;
 const BORDERLINE_CONFIRM_WINDOW_FRAMES = 8;
 // High-confidence bypass: scores at or above (cutoff + this margin)
-// trigger immediately on the first frame, skipping the two-frame
-// confirmation entirely. Disabled (null) because ok_nabu_v22 produces
-// 0.85+ raw spikes on unrelated TV/household speech, and those need to
-// go through the confirmation gate to be filtered. Only enable when the
-// model has been measured to keep single-frame FP peaks well below the
-// chosen bypass threshold on real ambient audio.
-const HIGH_CONFIDENCE_BYPASS_MARGIN = null;
+// trigger immediately on the first frame, skipping confirmation. This is
+// generic across OWW wake words: weak/borderline hits still need a second
+// frame, while very confident hits are allowed to feel responsive.
+const HIGH_CONFIDENCE_BYPASS_MARGIN = 0.25;
+const HIGH_CONFIDENCE_BYPASS_MIN_SCORE = 0.80;
 // Master switch for the borderline confirmation gate entirely. Leave
 // true unless the model has been measured to produce no single-frame
 // FP spikes above the cutoff on real ambient audio (TV / household
 // noise / coughs / multi-syllable "no no no" / repeated "ok X").
 const BORDERLINE_CONFIRM_ENABLED = true;
-// Training TODO: add prefix-only hard negatives for OWW wake words too
-// (for example "hey ja", "hey jar", "ok na") so partial phrases are rejected
-// by the model itself instead of relying only on runtime confirmation.
+// Training TODO: keep rejecting partial-phrase windows generically in the
+// trainer so incomplete wake words are handled by the model itself instead of
+// relying only on runtime confirmation.
 
 function nowMs() {
   return (typeof performance !== 'undefined' && typeof performance.now === 'function')
@@ -471,6 +469,7 @@ export class OwwBackend {
     if (
       typeof HIGH_CONFIDENCE_BYPASS_MARGIN === 'number'
       && score >= cutoff + HIGH_CONFIDENCE_BYPASS_MARGIN
+      && score >= HIGH_CONFIDENCE_BYPASS_MIN_SCORE
     ) {
       w.pendingConfirm = false;
       w.pendingConfirmAt = 0;

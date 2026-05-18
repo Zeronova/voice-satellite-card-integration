@@ -15,6 +15,11 @@ import { describeAudioInputDevices, describeSelectedAudioTrack } from '../audio/
 
 const CHUNK_SIZE = 1280; // 80ms @ 16 kHz
 const TARGET_RATE = 16000;
+const CHUNK_DURATION_MS = (CHUNK_SIZE / TARGET_RATE) * 1000;
+const SPEECH_ONSET_RMS = 0.020;
+const SPEECH_RELEASE_RMS = 0.010;
+const SPEECH_RELEASE_CHUNKS = 8;
+const SPEECH_ASSOCIATION_WINDOW_MS = 2500;
 
 export class WakeWordTestSession {
   constructor() {
@@ -36,6 +41,17 @@ export class WakeWordTestSession {
     this._detectionSeq = 0;
     this._lastDetectionAt = 0;
     this._lastDetectionInfo = null;
+    this._lastLatencyInfo = null;
+    this._latencySeq = 0;
+    this._processedChunkCount = 0;
+    this._thresholdTrackers = new Map();
+    this._pendingLatencyFinals = [];
+    this._speechActive = false;
+    this._speechStartAudioMs = null;
+    this._speechLastActiveAudioMs = null;
+    this._lastSpeechStartAudioMs = null;
+    this._lastSpeechEndAudioMs = null;
+    this._speechQuietChunks = 0;
 
     // Resampler scratch buffer
     this._resampleBuf = null;
@@ -135,6 +151,8 @@ export class WakeWordTestSession {
   get detectionSeq() { return this._detectionSeq; }
   get lastDetectionAt() { return this._lastDetectionAt; }
   get lastDetectionInfo() { return this._lastDetectionInfo; }
+  get lastLatencyInfo() { return this._lastLatencyInfo; }
+  get latencySeq() { return this._latencySeq; }
   /**
    * Sliding-window mean over recent inferences - what the engine actually
    * compares against the cutoff. The Wake Word Tester graphs this value.
@@ -168,6 +186,7 @@ export class WakeWordTestSession {
     this._detectionSeq = 0;
     this._lastDetectionAt = 0;
     this._lastDetectionInfo = null;
+    this._resetLatencyStats();
     this._resetPerfStats();
 
     await this._acquireMic();
@@ -190,6 +209,7 @@ export class WakeWordTestSession {
     this._detectionSeq = 0;
     this._lastDetectionAt = 0;
     this._lastDetectionInfo = null;
+    this._resetLatencyStats();
 
     try { this._sourceNode?.disconnect(); } catch (_) {}
     try { this._workletNode?.disconnect(); } catch (_) {}
@@ -238,6 +258,7 @@ export class WakeWordTestSession {
     this._detectionSeq = 0;
     this._lastDetectionAt = 0;
     this._lastDetectionInfo = null;
+    this._resetLatencyStats();
     this._resetPerfStats();
 
     if (this._isolatedRunner) {
@@ -454,11 +475,15 @@ export class WakeWordTestSession {
       while (this._frameQueue.length > 0 && this._running && this._inference) {
         const frame = this._frameQueue.shift();
         try {
+          const chunkIndex = this._processedChunkCount++;
+          const audioEndMs = (chunkIndex + 1) * CHUNK_DURATION_MS;
           const t0 = performance.now();
           const result = await this._inference.processChunk(frame);
           const dt = performance.now() - t0;
           this._recordPerfSample(dt, result?.timings || null);
           this._recordRmsSample(result?.rms);
+          this._updateSpeechOnset(result?.rms, audioEndMs);
+          const latencyInfo = this._updateThresholdLatency(result, audioEndMs);
           if (result?.detected) {
             this._detectionSeq++;
             this._lastDetectionAt =
@@ -466,12 +491,16 @@ export class WakeWordTestSession {
                 ? performance.now()
                 : Date.now();
             this._lastDetectionInfo = result;
+            this._lastLatencyInfo = latencyInfo;
+            this._latencySeq++;
             const model = result.model ?? this._modelName ?? '?';
             const mean = typeof result.score === 'number' ? result.score.toFixed(3) : '?';
             const cutoff = typeof result.cutoff === 'number' ? result.cutoff.toFixed(2) : '?';
+            const latencyBits = this._formatLatencyInfo(latencyInfo);
             this._emitLog(
               'trigger',
               `DETECTED "${model}" mean=${mean} cutoff=${cutoff} `
+              + `${latencyBits ? `${latencyBits} ` : ''}`
               + `rms_now=${(result.rms ?? 0).toFixed(4)} `
               + `rms_peak_1s=${this._getRecentRmsPeak(13).toFixed(4)}`,
             );
@@ -614,6 +643,183 @@ export class WakeWordTestSession {
     this._rmsHistory.fill(0);
     this._rmsHistoryHead = 0;
     this._rmsHistoryFilled = 0;
+  }
+
+  _resetLatencyStats() {
+    this._processedChunkCount = 0;
+    this._thresholdTrackers.clear();
+    this._pendingLatencyFinals.length = 0;
+    this._speechActive = false;
+    this._speechStartAudioMs = null;
+    this._speechLastActiveAudioMs = null;
+    this._lastSpeechStartAudioMs = null;
+    this._lastSpeechEndAudioMs = null;
+    this._speechQuietChunks = 0;
+    this._lastLatencyInfo = null;
+    this._latencySeq++;
+  }
+
+  _updateSpeechOnset(rms, audioEndMs) {
+    if (!Number.isFinite(rms)) return;
+    const audioStartMs = Math.max(0, audioEndMs - CHUNK_DURATION_MS);
+    if (rms >= SPEECH_ONSET_RMS) {
+      if (!this._speechActive) {
+        this._speechActive = true;
+        this._speechStartAudioMs = audioStartMs;
+        this._speechLastActiveAudioMs = audioEndMs;
+      }
+      this._speechLastActiveAudioMs = audioEndMs;
+      this._speechQuietChunks = 0;
+      return;
+    }
+    if (!this._speechActive) return;
+    if (rms > SPEECH_RELEASE_RMS) {
+      this._speechLastActiveAudioMs = audioEndMs;
+      this._speechQuietChunks = 0;
+      return;
+    }
+    if (rms <= SPEECH_RELEASE_RMS) {
+      this._speechQuietChunks++;
+      if (this._speechQuietChunks >= SPEECH_RELEASE_CHUNKS) {
+        this._rememberCompletedSpeech();
+        this._finalizeSpeechLatency();
+        this._speechActive = false;
+        this._speechStartAudioMs = null;
+        this._speechLastActiveAudioMs = null;
+        this._speechQuietChunks = 0;
+      }
+    }
+  }
+
+  _updateThresholdLatency(result, audioEndMs) {
+    if (!result || !this._modelName) return null;
+    const scores = result.perModelScores || {};
+    const model = result.model || this._modelName;
+    const score =
+      typeof scores[this._modelName] === 'number'
+        ? scores[this._modelName]
+        : (typeof result.score === 'number' ? result.score : 0);
+    const cutoff =
+      typeof result.cutoff === 'number'
+        ? result.cutoff
+        : (typeof this._threshold === 'number' ? this._threshold : 0.5);
+    const key = model || this._modelName;
+    let tracker = this._thresholdTrackers.get(key);
+
+    if (score > cutoff) {
+      if (!tracker) {
+        tracker = {
+          firstAboveAudioMs: audioEndMs,
+          firstAboveWallMs:
+            (typeof performance !== 'undefined' && typeof performance.now === 'function')
+              ? performance.now()
+              : Date.now(),
+          firstScore: score,
+          peakScore: score,
+          aboveFrames: 0,
+        };
+        this._thresholdTrackers.set(key, tracker);
+      }
+      tracker.aboveFrames += 1;
+      if (score > tracker.peakScore) tracker.peakScore = score;
+    } else {
+      this._thresholdTrackers.delete(key);
+      tracker = null;
+    }
+
+    if (!result.detected) return null;
+    if (!tracker) {
+      tracker = {
+        firstAboveAudioMs: audioEndMs,
+        firstAboveWallMs:
+          (typeof performance !== 'undefined' && typeof performance.now === 'function')
+            ? performance.now()
+            : Date.now(),
+        firstScore: score,
+        peakScore: score,
+        aboveFrames: 1,
+      };
+    }
+
+    const activeSpeechStart = this._speechStartAudioMs;
+    const recentSpeechStart = this._lastSpeechStartAudioMs;
+    const recentSpeechEnd = this._lastSpeechEndAudioMs;
+    const hasActiveSpeech = activeSpeechStart !== null;
+    const hasRecentSpeech =
+      !hasActiveSpeech
+      && recentSpeechStart !== null
+      && recentSpeechEnd !== null
+      && audioEndMs >= recentSpeechEnd
+      && (audioEndMs - recentSpeechEnd) <= SPEECH_ASSOCIATION_WINDOW_MS;
+    const speechStartAudioMs = hasActiveSpeech
+      ? activeSpeechStart
+      : (hasRecentSpeech ? recentSpeechStart : null);
+    const speechEndAudioMs = hasRecentSpeech ? recentSpeechEnd : null;
+    const speechToTriggerMs =
+      speechStartAudioMs !== null
+        ? Math.max(0, audioEndMs - speechStartAudioMs)
+        : null;
+    const speechEndToTriggerMs =
+      speechEndAudioMs !== null ? audioEndMs - speechEndAudioMs : null;
+    const thresholdToTriggerMs = Math.max(0, audioEndMs - tracker.firstAboveAudioMs);
+    const info = {
+      model: key,
+      triggerType: result.triggerType || 'detected',
+      audioTimeMs: audioEndMs,
+      triggerAudioMs: audioEndMs,
+      speechStartAudioMs,
+      speechEndAudioMs,
+      speechToTriggerMs,
+      speechEndToTriggerMs,
+      thresholdToTriggerMs,
+      aboveFrames: tracker.aboveFrames,
+      firstScore: tracker.firstScore,
+      triggerScore: score,
+      peakScore: Math.max(tracker.peakScore, score),
+      cutoff,
+    };
+    if (this._speechActive) {
+      this._pendingLatencyFinals.push(info);
+    }
+    this._thresholdTrackers.delete(key);
+    return info;
+  }
+
+  _finalizeSpeechLatency() {
+    const speechEndAudioMs = this._speechLastActiveAudioMs;
+    if (!Number.isFinite(speechEndAudioMs) || this._pendingLatencyFinals.length === 0) return;
+    const pending = this._pendingLatencyFinals.splice(0);
+    for (const info of pending) {
+      info.speechEndAudioMs = speechEndAudioMs;
+      info.speechEndToTriggerMs = info.triggerAudioMs - speechEndAudioMs;
+      this._lastLatencyInfo = info;
+      this._latencySeq++;
+      this._emitLog(
+        'diag',
+        `latency finalized: ${info.model} ${this._formatLatencyInfo(info)}`,
+      );
+    }
+  }
+
+  _rememberCompletedSpeech() {
+    if (this._speechStartAudioMs === null || this._speechLastActiveAudioMs === null) return;
+    this._lastSpeechStartAudioMs = this._speechStartAudioMs;
+    this._lastSpeechEndAudioMs = this._speechLastActiveAudioMs;
+  }
+
+  _formatLatencyInfo(info) {
+    if (!info) return '';
+    const fmtMs = (v) => Number.isFinite(v) ? `${Math.round(v)}ms` : 'n/a';
+    const parts = [
+      `latency_signal=${fmtMs(info.speechToTriggerMs)}`,
+      `latency_after_end=${fmtMs(info.speechEndToTriggerMs)}`,
+      `latency_threshold=${fmtMs(info.thresholdToTriggerMs)}`,
+      `above_frames=${info.aboveFrames}`,
+      `type=${info.triggerType}`,
+    ];
+    if (Number.isFinite(info.firstScore)) parts.push(`first=${info.firstScore.toFixed(3)}`);
+    if (Number.isFinite(info.peakScore)) parts.push(`peak=${info.peakScore.toFixed(3)}`);
+    return parts.join(' ');
   }
 
   _startMicHealthProbe() {

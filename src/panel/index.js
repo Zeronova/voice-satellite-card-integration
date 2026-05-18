@@ -1113,9 +1113,22 @@ class VoiceSatellitePanel extends HTMLElement {
         }
         .${P}-tester-latest,
         .${P}-tester-peak,
-        .${P}-tester-threshold-val {
+        .${P}-tester-threshold-val,
+        .${P}-tester-latency-signal,
+        .${P}-tester-latency-confirm,
+        .${P}-tester-latency-end {
           color: var(--primary-text-color, #fff);
           font-weight: 500;
+        }
+        .${P}-tester-latency-row {
+          display: flex;
+          justify-content: flex-end;
+          gap: 12px;
+          margin-top: -2px;
+          margin-bottom: 6px;
+          font-size: 12px;
+          color: var(--secondary-text-color, #999);
+          font-variant-numeric: tabular-nums;
         }
         .${P}-tester-graph {
           width: 100%;
@@ -1395,6 +1408,11 @@ class VoiceSatellitePanel extends HTMLElement {
               &nbsp;·&nbsp; peak <span class="${P}-tester-peak">0.000</span>
               &nbsp;·&nbsp; threshold <span class="${P}-tester-threshold-val">0.00</span>
             </div>
+          </div>
+          <div class="${P}-tester-latency-row">
+            <span>start -> trigger <span class="${P}-tester-latency-signal">--</span></span>
+            <span>end -> trigger <span class="${P}-tester-latency-end">--</span></span>
+            <span>threshold -> trigger <span class="${P}-tester-latency-confirm">--</span></span>
           </div>
           <canvas class="${P}-tester-graph" width="600" height="120"></canvas>
           <div class="${P}-tester-axis-note">
@@ -1800,6 +1818,9 @@ class VoiceSatellitePanel extends HTMLElement {
     const sensitivitySelect = card.querySelector(`#${P}-tester-sensitivity`);
     const toggleBtn = card.querySelector(`.${P}-tester-toggle`);
     const thresholdValEl = card.querySelector(`.${P}-tester-threshold-val`);
+    const latencySignalEl = card.querySelector(`.${P}-tester-latency-signal`);
+    const latencyConfirmEl = card.querySelector(`.${P}-tester-latency-confirm`);
+    const latencyEndEl = card.querySelector(`.${P}-tester-latency-end`);
 
     // Probability ring buffer (~6s @ 30Hz = 180 samples) - drives the
     // scrolling chart only. Peak is tracked separately as a session-max
@@ -1919,6 +1940,7 @@ class VoiceSatellitePanel extends HTMLElement {
       this._testerProbHead = 0;
       this._testerProbBuf.fill(0);
       this._testerPeakSmoothed = 0;
+      this._setTesterLatencyReadout(null, latencySignalEl, latencyConfirmEl, latencyEndEl);
       // Draw the idle frame so the user sees the grid + the dashed
       // threshold line at the new model's cutoff before they click Start.
       this._renderTesterIdleChart();
@@ -2047,6 +2069,7 @@ class VoiceSatellitePanel extends HTMLElement {
       this._testerProbCount = 0;
       this._testerProbHead = 0;
       this._testerProbBuf.fill(0);
+      this._setTesterLatencyReadout(null);
       const engineLabel = this._testerEngine === 'oww' ? 'openWakeWord' : 'microWakeWord';
       this._appendTesterLog(
         'info',
@@ -2135,7 +2158,11 @@ class VoiceSatellitePanel extends HTMLElement {
     const ctx = canvas?.getContext('2d');
     const latestEl = card?.querySelector(`.${P}-tester-latest`);
     const peakEl = card?.querySelector(`.${P}-tester-peak`);
+    const latencySignalEl = card?.querySelector(`.${P}-tester-latency-signal`);
+    const latencyConfirmEl = card?.querySelector(`.${P}-tester-latency-confirm`);
+    const latencyEndEl = card?.querySelector(`.${P}-tester-latency-end`);
     let lastDetectionSeq = 0;
+    let lastLatencySeq = 0;
 
     let lastSampleTs = 0;
     const SAMPLE_INTERVAL = 33; // ~30Hz
@@ -2176,6 +2203,16 @@ class VoiceSatellitePanel extends HTMLElement {
         if (detectionSeq !== lastDetectionSeq) {
           lastDetectionSeq = detectionSeq;
         }
+        const latencySeq = cs?.latencySeq || 0;
+        if (latencySeq !== lastLatencySeq) {
+          lastLatencySeq = latencySeq;
+          this._setTesterLatencyReadout(
+            cs?.lastLatencyInfo || null,
+            latencySignalEl,
+            latencyConfirmEl,
+            latencyEndEl,
+          );
+        }
       }
 
       // Repaint graph every frame for smooth scrolling
@@ -2186,6 +2223,24 @@ class VoiceSatellitePanel extends HTMLElement {
     };
 
     this._testerRafFrame = requestAnimationFrame(tick);
+  }
+
+  _setTesterLatencyReadout(info, signalEl = null, confirmEl = null, endEl = null) {
+    const card = this.querySelector(`.${P}-tester-card`);
+    const sigEl = signalEl || card?.querySelector(`.${P}-tester-latency-signal`);
+    const confEl = confirmEl || card?.querySelector(`.${P}-tester-latency-confirm`);
+    const endReadoutEl = endEl || card?.querySelector(`.${P}-tester-latency-end`);
+    const fmt = (ms) => Number.isFinite(ms) ? `${Math.round(ms)} ms` : '--';
+    const fmtSigned = (ms) => {
+      if (!Number.isFinite(ms)) return '--';
+      const rounded = Math.round(ms);
+      if (rounded < 0) return `${Math.abs(rounded)} ms before end`;
+      if (rounded > 0) return `${rounded} ms after end`;
+      return 'at end';
+    };
+    if (sigEl) sigEl.textContent = fmt(info?.speechToTriggerMs);
+    if (confEl) confEl.textContent = fmt(info?.thresholdToTriggerMs);
+    if (endReadoutEl) endReadoutEl.textContent = fmtSigned(info?.speechEndToTriggerMs);
   }
 
   /**
